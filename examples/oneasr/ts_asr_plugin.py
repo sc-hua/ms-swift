@@ -366,6 +366,8 @@ def run_standalone_eval(args) -> dict[str, float]:
         attn_impl=args.attn_impl,
         device_map=args.device_map,
         max_batch_size=args.batch_size,
+        load_args=False,
+        external_plugins=[],
     )
     model, template = prepare_model_template(infer_args)
     template.packing = False
