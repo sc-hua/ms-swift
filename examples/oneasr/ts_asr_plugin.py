@@ -5,14 +5,32 @@ validation file by removing the last assistant message, generating with the
 current trainer model, and computing WER/CER against that assistant target.
 """
 
+import argparse
 import json
 import re
+import sys
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
-from swift.callbacks.base import TrainerCallback
-from swift.callbacks.mapping import callbacks_map
+SWIFT_ROOT = Path(__file__).resolve().parents[2]
+if str(SWIFT_ROOT) not in sys.path:
+    sys.path.insert(0, str(SWIFT_ROOT))
+QWEN3_ASR_ROOT = SWIFT_ROOT.parent / "Qwen3-ASR"
+if QWEN3_ASR_ROOT.exists() and str(QWEN3_ASR_ROOT) not in sys.path:
+    sys.path.insert(0, str(QWEN3_ASR_ROOT))
+
+try:
+    from swift.callbacks.base import TrainerCallback
+    from swift.callbacks.mapping import callbacks_map
+except ModuleNotFoundError:
+    if __name__ != "__main__":
+        raise
+
+    class TrainerCallback:
+        pass
+
+    callbacks_map = {}
 
 
 CALLBACK_NAME = "oneasr_ts_asr_eval"
@@ -278,6 +296,17 @@ def log_metrics_to_swanlab(args, metrics: dict[str, float], step: int) -> None:
         swanlab.log(payload)
 
 
+def print_eval_summary(metrics: dict[str, float]) -> None:
+    print(
+        "[oneasr eval summary] "
+        f"records={metrics['records']} cer={metrics['cer']:.6f} "
+        f"exact_same={metrics['exact_same']:.6f} "
+        f"normalized_exact_same={metrics['normalized_exact_same']:.6f} "
+        f"english_wer={metrics['english_wer']:.6f}(n={metrics['english_records']}) "
+        f"chinese_cer={metrics['chinese_cer']:.6f}(n={metrics['chinese_records']})"
+    )
+
+
 def run_internal_eval(trainer, args, dataset_path: str, output_dir: str, step: int) -> dict[str, float]:
     from swift.infer_engine import RequestConfig, TransformersEngine
 
@@ -313,15 +342,81 @@ def run_internal_eval(trainer, args, dataset_path: str, output_dir: str, step: i
     metrics = summarize_predictions(rows)
     write_eval_outputs(output_dir, step, rows, metrics)
     log_metrics_to_swanlab(args, metrics, step)
-    print(
-        "[oneasr eval summary] "
-        f"records={metrics['records']} cer={metrics['cer']:.6f} "
-        f"exact_same={metrics['exact_same']:.6f} "
-        f"normalized_exact_same={metrics['normalized_exact_same']:.6f} "
-        f"english_wer={metrics['english_wer']:.6f}(n={metrics['english_records']}) "
-        f"chinese_cer={metrics['chinese_cer']:.6f}(n={metrics['chinese_records']})"
-    )
+    print_eval_summary(metrics)
     return metrics
+
+
+def infer_step_from_path(path: str) -> int:
+    match = re.search(r"checkpoint-(\d+)", str(path or ""))
+    return int(match.group(1)) if match else 0
+
+
+def run_standalone_eval(args) -> dict[str, float]:
+    from swift.arguments import InferArguments
+    from swift.infer_engine import RequestConfig, TransformersEngine
+    from swift.pipelines.utils import prepare_model_template
+
+    infer_args = InferArguments(
+        model=args.model or None,
+        adapters=args.adapters,
+        model_type=args.model_type,
+        template=args.template,
+        infer_backend="transformers",
+        torch_dtype=args.torch_dtype,
+        attn_impl=args.attn_impl,
+        device_map=args.device_map,
+        max_batch_size=args.batch_size,
+    )
+    model, template = prepare_model_template(infer_args)
+    template.packing = False
+    template.padding_free = False
+    engine = TransformersEngine(model, template=template, max_batch_size=args.batch_size)
+    request_config = RequestConfig(max_tokens=args.max_new_tokens, temperature=0.0)
+
+    records = load_eval_records(args.val_dataset)
+    if not records:
+        raise ValueError(f"No eval records with a final assistant message found: {args.val_dataset}")
+    model.eval()
+    responses = engine.infer(records, request_config=request_config, use_tqdm=True)
+
+    rows = []
+    for record, response in zip(records, responses):
+        rows.append({**record, "prediction": response.choices[0].message.content})
+    rows = build_metric_rows(rows)
+    metrics = summarize_predictions(rows)
+    step = args.step if args.step is not None else infer_step_from_path(args.adapters[0] if args.adapters else args.model)
+    write_eval_outputs(args.output_dir, step, rows, metrics)
+    print_eval_summary(metrics)
+    return metrics
+
+
+def parse_standalone_eval_args(argv=None):
+    parser = argparse.ArgumentParser(description="OneASR ms-swift generation eval")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    eval_parser = subparsers.add_parser("eval", help="Run generation eval without SFT")
+    eval_parser.add_argument("--model", default="", help="Base/full model path. For LoRA, pass the base model here.")
+    eval_parser.add_argument("--adapters", nargs="*", default=[], help="Optional LoRA checkpoint path(s).")
+    eval_parser.add_argument("--val_dataset", required=True, help="ms-swift validation JSONL.")
+    eval_parser.add_argument("--output_dir", required=True, help="Directory for checkpoint-*.jsonl/md outputs.")
+    eval_parser.add_argument("--model_type", default="qwen3_asr")
+    eval_parser.add_argument("--template", default="qwen3_asr")
+    eval_parser.add_argument("--torch_dtype", default="bfloat16", choices=["bfloat16", "float16", "float32"])
+    eval_parser.add_argument("--attn_impl", default="eager")
+    eval_parser.add_argument("--device_map", default=None)
+    eval_parser.add_argument("--batch_size", type=int, default=4)
+    eval_parser.add_argument("--max_new_tokens", type=int, default=128)
+    eval_parser.add_argument("--step", type=int, default=None)
+    args = parser.parse_args(argv)
+    if args.command == "eval" and not args.model and not args.adapters:
+        parser.error("eval requires --model or --adapters")
+    return args
+
+
+def main(argv=None):
+    args = parse_standalone_eval_args(argv)
+    if args.command == "eval":
+        return run_standalone_eval(args)
+    raise ValueError(f"Unsupported command: {args.command}")
 
 
 class OneASRTSASREvalCallback(TrainerCallback):
@@ -343,3 +438,7 @@ class OneASRTSASREvalCallback(TrainerCallback):
 
 
 callbacks_map[CALLBACK_NAME] = OneASRTSASREvalCallback
+
+
+if __name__ == "__main__":
+    main()
