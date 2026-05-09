@@ -127,8 +127,20 @@ def build_metric_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return metric_rows
 
 
-def _copy_request_fields(row: dict[str, Any], messages: list[dict[str, Any]], label: str) -> dict[str, Any]:
-    request = {"messages": messages, "label": label}
+def _copy_request_fields(
+    row: dict[str, Any],
+    messages: list[dict[str, Any]],
+    label: str,
+    dataset_path: str,
+    line_no: int,
+    eval_index: int,
+) -> dict[str, Any]:
+    request = {
+        "eval_index": eval_index,
+        "eval_source": {"dataset_path": dataset_path, "line_no": line_no},
+        "messages": messages,
+        "label": label,
+    }
     for key in ["images", "audios", "videos", "tools", "objects", "chat_template_kwargs"]:
         if key in row:
             request[key] = row[key]
@@ -138,7 +150,7 @@ def _copy_request_fields(row: dict[str, Any], messages: list[dict[str, Any]], la
 def load_eval_records(dataset_path: str) -> list[dict[str, Any]]:
     records = []
     with open(dataset_path, "r", encoding="utf-8") as f:
-        for line in f:
+        for line_no, line in enumerate(f, start=1):
             line = line.strip()
             if not line:
                 continue
@@ -147,7 +159,7 @@ def load_eval_records(dataset_path: str) -> list[dict[str, Any]]:
             if not messages or messages[-1].get("role") != "assistant":
                 continue
             label = str(messages.pop().get("content") or "")
-            records.append(_copy_request_fields(row, messages, label))
+            records.append(_copy_request_fields(row, messages, label, dataset_path, line_no, len(records) + 1))
     return records
 
 
@@ -295,7 +307,7 @@ def run_internal_eval(trainer, args, dataset_path: str, output_dir: str, step: i
     rows = []
     for record, response in zip(records, responses):
         prediction = response.choices[0].message.content
-        rows.append({"prediction": prediction, "label": record["label"]})
+        rows.append({**record, "prediction": prediction})
 
     rows = build_metric_rows(rows)
     metrics = summarize_predictions(rows)
