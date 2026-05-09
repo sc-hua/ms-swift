@@ -25,6 +25,15 @@ def resolve_eval_dataset(args) -> str:
         return val_dataset
     if isinstance(val_dataset, (list, tuple)) and val_dataset:
         return str(val_dataset[0])
+    args_path = Path(getattr(args, "output_dir", ".")) / "args.json"
+    if args_path.exists():
+        with open(args_path, "r", encoding="utf-8") as f:
+            saved_args = json.load(f)
+        val_dataset = saved_args.get("val_dataset")
+        if isinstance(val_dataset, str):
+            return val_dataset
+        if isinstance(val_dataset, (list, tuple)) and val_dataset:
+            return str(val_dataset[0])
     return ""
 
 

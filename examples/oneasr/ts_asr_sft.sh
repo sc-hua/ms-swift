@@ -9,6 +9,10 @@ ONEASR_ROOT="${ONEASR_ROOT:-$(cd "$(dirname "$0")/../../.." && pwd)}"
 MODEL_PATH=${ONEASR_ROOT}/ckpts/qwen3-asr-0_6b
 DATA_ROOT=${ONEASR_ROOT}/data/ts_asr_v6
 EXP_NAME=swift_ts_asr_v6
+TRAIN_DATASET="${TRAIN_DATASET:-${DATA_ROOT}/train.swift.jsonl}"
+VAL_DATASET="${VAL_DATASET:-${DATA_ROOT}/val.swift.jsonl}"
+OUTPUT_DIR="${OUTPUT_DIR:-${ONEASR_ROOT}/runs/${EXP_NAME}}"
+REPORT_TO="${REPORT_TO:-swanlab}"
 
 # add qwen3-asr and ms-swift modules to PYTHONPATH
 export PYTHONPATH="${ONEASR_ROOT}/Qwen3-ASR:${ONEASR_ROOT}/ms-swift:${PYTHONPATH:-}"
@@ -19,10 +23,10 @@ swift sft \
   --model "${MODEL_PATH}" \
   --model_type qwen3_asr \
   --template qwen3_asr \
-  --dataset "${DATA_ROOT}/train.swift.jsonl" \
-  --val_dataset "${DATA_ROOT}/val.swift.jsonl" \
+  --dataset "${TRAIN_DATASET}" \
+  --val_dataset "${VAL_DATASET}" \
   --tuner_type lora \
-  --target_regex '^thinker\.model\.layers\.[0-9]+\.(self_attn\.(q_proj|k_proj|v_proj|o_proj)|mlp\.(gate_proj|up_proj|down_proj))$' \  # only llm backbone
+  --target_regex '^thinker\.model\.layers\.[0-9]+\.(self_attn\.(q_proj|k_proj|v_proj|o_proj)|mlp\.(gate_proj|up_proj|down_proj))$' \
   --lora_rank "${LORA_RANK:-64}" \
   --lora_alpha "${LORA_ALPHA:-128}" \
   --lora_dropout "${LORA_DROPOUT:-0.05}" \
@@ -40,7 +44,7 @@ swift sft \
   --logging_steps "${LOGGING_STEPS:-10}" \
   --save_total_limit "${SAVE_TOTAL_LIMIT:-3}" \
   --dataloader_num_workers "${NUM_WORKERS:-4}" \
-  --report_to "swanlab" \
+  --report_to "${REPORT_TO}" \
   --swanlab_project "Swift-OneASR" \
   --swanlab_exp_name "${EXP_NAME}" \
-  --output_dir "${ONEASR_ROOT}/runs/${EXP_NAME}"
+  --output_dir "${OUTPUT_DIR}"
