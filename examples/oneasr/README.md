@@ -17,7 +17,7 @@
 - `OUTPUT_DIR`：默认 `runs/swift_ts_asr_v6`
 - `REPORT_TO`：默认 `swanlab`
 
-Callback 读取第一个 `--val_dataset` ms-swift JSONL 并计算轻量生成式指标。ms-swift JSONL 只保留 `oneasr_id` 用于溯源；task、SNR、power 等分析字段从 `SOURCE_MANIFEST` 指向的原始 OneASR manifest 读取。中文样本主看 CER，英文样本报 WER。`normalized_exact_same` 忽略标点和空白差异。报告包含 overall、task 和 eval mode 三级汇总。`with_ref` 是原始 ref+mix 请求；`no_ref_mix` 是仅给 mix 音频、使用普通 ASR prompt 的 control。`No-ref Mix Control` 表显示 ref 是否真正起作用：`with_ref_only_correct` 表示 ref conditioning 修正了该样本，`no_ref_also_correct` 表示不带 ref 也能转写正确。`task=asr` 且 `source=asr_replay` 的普通 ASR replay 单独显示为 `asr_replay`。SNR 分桶只统计源 manifest 里带 `target_active_snr_db` 的样本，普通 `task=asr` replay 不进入 SNR 分桶。若源 manifest 带 component power 字段，报告还会在每个 target SNR 桶内按 dominant interference 拆分为 `non_target_speech` 和 `noise`。Callback 复用 `swift sft` 的 output_dir、eval batch size、max_new_tokens 和 SwanLab 配置。
+Callback 读取第一个 `--val_dataset` ms-swift JSONL 并计算轻量生成式指标。ms-swift JSONL 只保留 `oneasr_id` 用于溯源；task、SNR、power 等分析字段从 `SOURCE_MANIFEST` 指向的原始 OneASR manifest 读取。中文样本主看 CER，英文样本报 WER。`normalized_exact_same` 忽略标点和空白差异。报告包含 overall、task 和 eval mode 三级汇总。`with_ref` 是原始 ref+mix 请求；`no_ref_mix` 是仅给 mix 音频、使用普通 ASR prompt 的 control。`No-ref Mix Control` 表显示 ref 是否真正起作用：`with_ref_only_correct` 表示 ref conditioning 修正了该样本，`no_ref_also_correct` 表示不带 ref 也能转写正确。`Fine SNR No-ref Control` 会把这个对照按更细的 target SNR 桶展开。`task=asr` 且 `source=asr_replay` 的普通 ASR replay 单独显示为 `asr_replay`。SNR 分桶只统计源 manifest 里带 `target_active_snr_db` 的样本，普通 `task=asr` replay 不进入 SNR 分桶。若源 manifest 带 component power 字段，报告还会在每个 target SNR 桶内按 dominant interference 拆分为 `non_target_speech` 和 `noise`。Callback 复用 `swift sft` 的 output_dir、eval batch size、max_new_tokens 和 SwanLab 配置。
 
 ## 运行
 

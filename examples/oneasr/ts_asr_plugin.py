@@ -343,6 +343,27 @@ def task_group(row: dict[str, Any]) -> str:
 
 
 SNR_BUCKET_EDGES = [-15, -10, -5, -2, 0, 2, 5, 10, 15, 20, 30]
+FINE_SNR_BUCKETS = [
+    ("<=-25", None, -25),
+    ("-25~-20", -25, -20),
+    ("-20~-15", -20, -15),
+    ("-15~-12", -15, -12),
+    ("-12~-10", -12, -10),
+    ("-10~-8", -10, -8),
+    ("-8~-6", -8, -6),
+    ("-6~-4", -6, -4),
+    ("-4~-2", -4, -2),
+    ("-2~0", -2, 0),
+    ("0~2", 0, 2),
+    ("2~4", 2, 4),
+    ("4~6", 4, 6),
+    ("6~8", 6, 8),
+    ("8~10", 8, 10),
+    ("10~15", 10, 15),
+    ("15~20", 15, 20),
+    ("20~30", 20, 30),
+    (">30", 30, None),
+]
 
 
 def _snr_bucket_label(low: float | None, high: float | None) -> str:
@@ -545,6 +566,58 @@ def summarize_no_ref_control(rows: list[dict[str, Any]]) -> dict[str, float]:
     return result
 
 
+def _paired_no_ref_rows(rows: list[dict[str, Any]]) -> list[dict[str, dict[str, Any]]]:
+    metric_rows = rows if rows and "cer" in rows[0] else build_metric_rows(rows)
+    groups: dict[str, dict[str, dict[str, Any]]] = {}
+    for row in metric_rows:
+        pair_id = row.get("eval_pair_id")
+        mode = row.get("eval_mode")
+        if pair_id and mode in {WITH_REF_MODE, NO_REF_MIX_MODE}:
+            groups.setdefault(str(pair_id), {})[str(mode)] = row
+    return [pair for pair in groups.values() if WITH_REF_MODE in pair and NO_REF_MIX_MODE in pair]
+
+
+def summarize_no_ref_control_by_snr(rows: list[dict[str, Any]]) -> list[dict[str, float]]:
+    pairs = _paired_no_ref_rows(rows)
+    result = []
+    for label, low, high in FINE_SNR_BUCKETS:
+        bucket_pairs = [
+            pair for pair in pairs
+            if pair[WITH_REF_MODE].get("target_active_snr_db") is not None
+            and _in_bucket(float(pair[WITH_REF_MODE]["target_active_snr_db"]), low, high)
+        ]
+        if not bucket_pairs:
+            continue
+        with_ref_rows = [pair[WITH_REF_MODE] for pair in bucket_pairs]
+        no_ref_rows = [pair[NO_REF_MIX_MODE] for pair in bucket_pairs]
+        item = {
+            "snr_bucket": label,
+            "pairs": len(bucket_pairs),
+            "with_ref_cer": _mean([row["cer"] for row in with_ref_rows]),
+            "no_ref_mix_cer": _mean([row["cer"] for row in no_ref_rows]),
+            "with_ref_normalized_exact_same": _rate([row["normalized_exact_same"] for row in with_ref_rows]),
+            "no_ref_mix_normalized_exact_same": _rate([row["normalized_exact_same"] for row in no_ref_rows]),
+            "with_ref_only_correct": 0,
+            "no_ref_also_correct": 0,
+            "no_ref_only_correct": 0,
+            "both_wrong": 0,
+        }
+        item["cer_delta_no_ref_minus_with_ref"] = item["no_ref_mix_cer"] - item["with_ref_cer"]
+        for pair in bucket_pairs:
+            wr = bool(pair[WITH_REF_MODE]["normalized_exact_same"])
+            nr = bool(pair[NO_REF_MIX_MODE]["normalized_exact_same"])
+            if wr and nr:
+                item["no_ref_also_correct"] += 1
+            elif wr and not nr:
+                item["with_ref_only_correct"] += 1
+            elif nr and not wr:
+                item["no_ref_only_correct"] += 1
+            else:
+                item["both_wrong"] += 1
+        result.append(item)
+    return result
+
+
 def _fmt_metric(value: float | None) -> str:
     return "n/a" if value is None else f"{value:.6f}"
 
@@ -610,6 +683,24 @@ def write_eval_outputs(output_dir: str, step: int, rows: list[dict[str, Any]], m
                 f"{no_ref_control['no_ref_only_correct']} | {no_ref_control['both_wrong']} |"
             ),
         ])
+
+    fine_snr_control = summarize_no_ref_control_by_snr(rows)
+    if fine_snr_control:
+        lines.extend([
+            "",
+            "## Fine SNR No-ref Control",
+            "",
+            "| SNR bucket | pairs | with_ref CER | no_ref_mix CER | CER delta(no_ref-with_ref) | with_ref normalized_exact_same | no_ref_mix normalized_exact_same | with_ref_only_correct | no_ref_also_correct | no_ref_only_correct | both_wrong |",
+            "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+        ])
+        for b in fine_snr_control:
+            lines.append(
+                f"| {b['snr_bucket']} | {b['pairs']} | {b['with_ref_cer']:.6f} | "
+                f"{b['no_ref_mix_cer']:.6f} | {b['cer_delta_no_ref_minus_with_ref']:.6f} | "
+                f"{b['with_ref_normalized_exact_same']:.6f} | {b['no_ref_mix_normalized_exact_same']:.6f} | "
+                f"{b['with_ref_only_correct']} | {b['no_ref_also_correct']} | "
+                f"{b['no_ref_only_correct']} | {b['both_wrong']} |"
+            )
 
     snr_buckets = summarize_by_snr(rows)
     if snr_buckets:
