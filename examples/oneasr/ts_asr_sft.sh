@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Run from /Users/hua/work/OneASR/ms-swift:
+# Run from OneASR/ms-swift:
 #   bash examples/oneasr/ts_asr_sft.sh
 
 ONEASR_ROOT="${ONEASR_ROOT:-$(cd "$(dirname "$0")/../../.." && pwd)}"
@@ -22,7 +22,7 @@ swift sft \
   --dataset "${DATA_ROOT}/train.swift.jsonl" \
   --val_dataset "${DATA_ROOT}/val.swift.jsonl" \
   --tuner_type lora \
-  --target_modules q_proj k_proj v_proj o_proj gate_proj up_proj down_proj \
+  --target_regex '^thinker\.model\.layers\.[0-9]+\.(self_attn\.(q_proj|k_proj|v_proj|o_proj)|mlp\.(gate_proj|up_proj|down_proj))$' \  # only llm backbone
   --lora_rank "${LORA_RANK:-64}" \
   --lora_alpha "${LORA_ALPHA:-128}" \
   --lora_dropout "${LORA_DROPOUT:-0.05}" \
