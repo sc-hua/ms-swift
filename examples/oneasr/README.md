@@ -16,7 +16,7 @@ This folder contains OneASR project extensions for running Qwen3-ASR TS-ASR SFT 
 - `OUTPUT_DIR`: default `runs/swift_ts_asr_v6`
 - `REPORT_TO`: default `swanlab`
 
-The callback reads the first `--val_dataset` ms-swift JSONL and computes lightweight generation WER/CER. It uses the same ms-swift arguments for output directory, eval batch size, max generated tokens, and SwanLab logging.
+The callback reads the first `--val_dataset` ms-swift JSONL and computes lightweight generation metrics. Chinese samples use CER as the primary metric; English samples report WER. It uses the same ms-swift arguments for output directory, eval batch size, max generated tokens, and SwanLab logging.
 
 ## Run
 
@@ -36,4 +36,4 @@ REPORT_TO=none \
 bash examples/oneasr/ts_asr_sft.sh
 ```
 
-This callback is intentionally minimal: it removes the final assistant message, generates from the remaining prompt, and reports WER/CER/exact against that assistant target. It does not implement OneASR's full `with_ref` / `external_ref` / `clean_speaker` manifest expansion.
+This callback is intentionally minimal: it removes the final assistant message, generates from the remaining prompt, and reports language-aware WER/CER/exact_same metrics against that assistant target. It does not implement OneASR's full `with_ref` / `external_ref` / `clean_speaker` manifest expansion.

@@ -44,6 +44,16 @@ def parse_asr_text(raw: str) -> str:
     return raw.split(ASR_TEXT_TAG, 1)[1].strip()
 
 
+def parse_language(raw: str) -> str:
+    match = re.match(r"^\s*language\s+([^<\s]+)\s*<asr_text>", str(raw or ""))
+    return match.group(1) if match else "unknown"
+
+
+def normalize_for_exact(text: str) -> str:
+    text = parse_asr_text(text).lower()
+    return "".join(re.findall(r"[\u4e00-\u9fffA-Za-z0-9]+", text))
+
+
 def normalize_words(text: str) -> list[str]:
     text = parse_asr_text(text).lower()
     text = re.sub(r"[^a-z0-9']+", " ", text)
@@ -83,6 +93,40 @@ def char_error_rate(prediction: str, reference: str) -> float:
     return error_rate(normalize_chars(prediction), normalize_chars(reference))
 
 
+def uses_word_error_rate(language: str) -> bool:
+    return language.lower() == "english"
+
+
+def metric_language(prediction: str, label: str) -> str:
+    label_language = parse_language(label)
+    if label_language != "unknown":
+        return label_language
+    return parse_language(prediction)
+
+
+def build_metric_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    metric_rows = []
+    for row in rows:
+        prediction = row["prediction"]
+        label = row["label"]
+        language = metric_language(prediction, label)
+        pred_text = parse_asr_text(prediction)
+        label_text = parse_asr_text(label)
+        metric_rows.append(
+            {
+                **row,
+                "language": language,
+                "prediction_text": pred_text,
+                "label_text": label_text,
+                "wer": word_error_rate(prediction, label) if uses_word_error_rate(language) else None,
+                "cer": char_error_rate(prediction, label),
+                "exact_same": pred_text.strip() == label_text.strip(),
+                "normalized_exact_same": normalize_for_exact(prediction) == normalize_for_exact(label),
+            }
+        )
+    return metric_rows
+
+
 def _copy_request_fields(row: dict[str, Any], messages: list[dict[str, Any]], label: str) -> dict[str, Any]:
     request = {"messages": messages, "label": label}
     for key in ["images", "audios", "videos", "tools", "objects", "chat_template_kwargs"]:
@@ -107,21 +151,59 @@ def load_eval_records(dataset_path: str) -> list[dict[str, Any]]:
     return records
 
 
+def _mean(values: list[float]) -> float:
+    return sum(values) / len(values) if values else 0.0
+
+
+def _rate(values: list[bool]) -> float:
+    return sum(values) / len(values) if values else 0.0
+
+
 def summarize_predictions(rows: list[dict[str, Any]]) -> dict[str, float]:
     if not rows:
-        return {"records": 0, "wer": 0.0, "cer": 0.0, "exact": 0.0}
-    wers = [word_error_rate(row["prediction"], row["label"]) for row in rows]
-    cers = [char_error_rate(row["prediction"], row["label"]) for row in rows]
-    exact = [
-        parse_asr_text(row["prediction"]).strip() == parse_asr_text(row["label"]).strip()
-        for row in rows
-    ]
+        return {
+            "records": 0,
+            "wer": 0.0,
+            "wer_records": 0,
+            "cer": 0.0,
+            "exact_same": 0.0,
+            "normalized_exact_same": 0.0,
+            "english_records": 0,
+            "english_wer": 0.0,
+            "english_cer": 0.0,
+            "english_exact_same": 0.0,
+            "english_normalized_exact_same": 0.0,
+            "chinese_records": 0,
+            "chinese_cer": 0.0,
+            "chinese_exact_same": 0.0,
+            "chinese_normalized_exact_same": 0.0,
+        }
+
+    metric_rows = rows if "cer" in rows[0] else build_metric_rows(rows)
+    wer_rows = [row for row in metric_rows if row.get("wer") is not None]
+    english_rows = [row for row in metric_rows if row["language"].lower() == "english"]
+    chinese_rows = [row for row in metric_rows if row["language"].lower() == "chinese"]
     return {
-        "records": len(rows),
-        "wer": sum(wers) / len(wers),
-        "cer": sum(cers) / len(cers),
-        "exact": sum(exact) / len(exact),
+        "records": len(metric_rows),
+        "wer": _mean([row["wer"] for row in wer_rows]),
+        "wer_records": len(wer_rows),
+        "cer": _mean([row["cer"] for row in metric_rows]),
+        "exact_same": _rate([row["exact_same"] for row in metric_rows]),
+        "normalized_exact_same": _rate([row["normalized_exact_same"] for row in metric_rows]),
+        "english_records": len(english_rows),
+        "english_wer": _mean([row["wer"] for row in english_rows if row.get("wer") is not None]),
+        "english_cer": _mean([row["cer"] for row in english_rows]),
+        "english_exact_same": _rate([row["exact_same"] for row in english_rows]),
+        "english_normalized_exact_same": _rate([row["normalized_exact_same"] for row in english_rows]),
+        "chinese_records": len(chinese_rows),
+        "chinese_cer": _mean([row["cer"] for row in chinese_rows]),
+        "chinese_exact_same": _rate([row["exact_same"] for row in chinese_rows]),
+        "chinese_normalized_exact_same": _rate([row["normalized_exact_same"] for row in chinese_rows]),
     }
+
+
+def _fmt_metric(value: float | None) -> str:
+    return "n/a" if value is None else f"{value:.6f}"
 
 
 def write_eval_outputs(output_dir: str, step: int, rows: list[dict[str, Any]], metrics: dict[str, float]) -> None:
@@ -137,17 +219,24 @@ def write_eval_outputs(output_dir: str, step: int, rows: list[dict[str, Any]], m
     lines = [
         f"# OneASR ms-swift Eval checkpoint-{step}",
         "",
-        "| records | WER | CER | exact |",
-        "| --- | --- | --- | --- |",
-        f"| {metrics['records']} | {metrics['wer']:.6f} | {metrics['cer']:.6f} | {metrics['exact']:.6f} |",
+        "| records | CER | exact_same | normalized_exact_same | WER records | English WER | Chinese records | Chinese CER |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- |",
+        (
+            f"| {metrics['records']} | {metrics['cer']:.6f} | {metrics['exact_same']:.6f} | "
+            f"{metrics['normalized_exact_same']:.6f} | {metrics['wer_records']} | "
+            f"{metrics['english_wer']:.6f} | {metrics['chinese_records']} | {metrics['chinese_cer']:.6f} |"
+        ),
         "",
-        "| idx | prediction | label |",
-        "| --- | --- | --- |",
+        "| idx | language | WER | CER | normalized_exact_same | prediction | label |",
+        "| --- | --- | --- | --- | --- | --- | --- |",
     ]
     for idx, row in enumerate(rows[:50], start=1):
         pred = str(row["prediction"]).replace("|", "\\|")
         label = str(row["label"]).replace("|", "\\|")
-        lines.append(f"| {idx} | {pred} | {label} |")
+        lines.append(
+            f"| {idx} | {row['language']} | {_fmt_metric(row.get('wer'))} | {row['cer']:.6f} | "
+            f"{row['normalized_exact_same']} | {pred} | {label} |"
+        )
     md_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     print(f"[oneasr eval output] {jsonl_path}")
     print(f"[oneasr eval output] {md_path}")
@@ -206,23 +295,19 @@ def run_internal_eval(trainer, args, dataset_path: str, output_dir: str, step: i
     rows = []
     for record, response in zip(records, responses):
         prediction = response.choices[0].message.content
-        row = {
-            "prediction": prediction,
-            "label": record["label"],
-            "prediction_text": parse_asr_text(prediction),
-            "label_text": parse_asr_text(record["label"]),
-            "wer": word_error_rate(prediction, record["label"]),
-            "cer": char_error_rate(prediction, record["label"]),
-        }
-        rows.append(row)
+        rows.append({"prediction": prediction, "label": record["label"]})
 
+    rows = build_metric_rows(rows)
     metrics = summarize_predictions(rows)
     write_eval_outputs(output_dir, step, rows, metrics)
     log_metrics_to_swanlab(args, metrics, step)
     print(
         "[oneasr eval summary] "
-        f"records={metrics['records']} wer={metrics['wer']:.6f} "
-        f"cer={metrics['cer']:.6f} exact={metrics['exact']:.6f}"
+        f"records={metrics['records']} cer={metrics['cer']:.6f} "
+        f"exact_same={metrics['exact_same']:.6f} "
+        f"normalized_exact_same={metrics['normalized_exact_same']:.6f} "
+        f"english_wer={metrics['english_wer']:.6f}(n={metrics['english_records']}) "
+        f"chinese_cer={metrics['chinese_cer']:.6f}(n={metrics['chinese_records']})"
     )
     return metrics
 
