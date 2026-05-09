@@ -159,7 +159,7 @@ def _copy_request_fields(
         "messages": messages,
         "label": label,
     }
-    for key in ["images", "audios", "videos", "tools", "objects", "chat_template_kwargs"]:
+    for key in ["images", "audios", "videos", "tools", "objects", "chat_template_kwargs", "oneasr_id", "target_active_snr_db"]:
         if key in row:
             request[key] = row[key]
     return request
@@ -187,6 +187,55 @@ def _mean(values: list[float]) -> float:
 
 def _rate(values: list[bool]) -> float:
     return sum(values) / len(values) if values else 0.0
+
+
+SNR_BUCKET_EDGES = [-15, -10, -5, -2, 0, 2, 5, 10, 15, 20, 30]
+
+
+def _snr_bucket_label(low: float | None, high: float | None) -> str:
+    if low is None:
+        return f"(-inf, {high}]"
+    if high is None:
+        return f"({low}, inf)"
+    return f"({low}, {high}]"
+
+
+def _snr_buckets() -> list[tuple[str, float | None, float | None]]:
+    buckets: list[tuple[str, float | None, float | None]] = []
+    buckets.append((_snr_bucket_label(None, SNR_BUCKET_EDGES[0]), None, SNR_BUCKET_EDGES[0]))
+    for i in range(len(SNR_BUCKET_EDGES) - 1):
+        buckets.append((_snr_bucket_label(SNR_BUCKET_EDGES[i], SNR_BUCKET_EDGES[i + 1]), SNR_BUCKET_EDGES[i], SNR_BUCKET_EDGES[i + 1]))
+    buckets.append((_snr_bucket_label(SNR_BUCKET_EDGES[-1], None), SNR_BUCKET_EDGES[-1], None))
+    return buckets
+
+
+def _in_bucket(snr: float, low: float | None, high: float | None) -> bool:
+    if low is not None and snr <= low:
+        return False
+    if high is not None and snr > high:
+        return False
+    return True
+
+
+def summarize_by_snr(metric_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows_with_snr = [r for r in metric_rows if r.get("target_active_snr_db") is not None]
+    if not rows_with_snr:
+        return []
+    result = []
+    for label, low, high in _snr_buckets():
+        bucket_rows = [r for r in rows_with_snr if _in_bucket(r["target_active_snr_db"], low, high)]
+        if not bucket_rows:
+            result.append({"snr_bucket": label, "records": 0})
+            continue
+        wer_rows = [r for r in bucket_rows if r.get("wer") is not None]
+        result.append({
+            "snr_bucket": label,
+            "records": len(bucket_rows),
+            "cer": _mean([r["cer"] for r in bucket_rows]),
+            "wer": _mean([r["wer"] for r in wer_rows]) if wer_rows else None,
+            "normalized_exact_same": _rate([r["normalized_exact_same"] for r in bucket_rows]),
+        })
+    return result
 
 
 def summarize_predictions(rows: list[dict[str, Any]]) -> dict[str, float]:
@@ -256,10 +305,27 @@ def write_eval_outputs(output_dir: str, step: int, rows: list[dict[str, Any]], m
             f"{metrics['normalized_exact_same']:.6f} | {metrics['wer_records']} | "
             f"{metrics['english_wer']:.6f} | {metrics['chinese_records']} | {metrics['chinese_cer']:.6f} |"
         ),
-        "",
-        "| idx | language | WER | CER | normalized_exact_same | prediction | label |",
-        "| --- | --- | --- | --- | --- | --- | --- |",
     ]
+
+    snr_buckets = summarize_by_snr(rows)
+    if snr_buckets:
+        lines.append("")
+        lines.append("## SNR Buckets")
+        lines.append("")
+        lines.append("| SNR bucket | records | CER | WER | normalized_exact_same |")
+        lines.append("| --- | --- | --- | --- | --- |")
+        for b in snr_buckets:
+            if b["records"] == 0:
+                lines.append(f"| {b['snr_bucket']} | 0 | - | - | - |")
+            else:
+                lines.append(
+                    f"| {b['snr_bucket']} | {b['records']} | {b['cer']:.6f} | "
+                    f"{_fmt_metric(b.get('wer'))} | {b['normalized_exact_same']:.6f} |"
+                )
+
+    lines.append("")
+    lines.append("| idx | language | WER | CER | normalized_exact_same | prediction | label |")
+    lines.append("| --- | --- | --- | --- | --- | --- | --- |")
     for idx, row in enumerate(rows[:50], start=1):
         pred = str(row["prediction"]).replace("|", "\\|")
         label = str(row["label"]).replace("|", "\\|")
