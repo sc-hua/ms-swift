@@ -36,9 +36,14 @@ except ModuleNotFoundError:
 
 CALLBACK_NAME = "oneasr_ts_asr_eval"
 ASR_TEXT_TAG = "<asr_text>"
+WITH_REF_MODE = "with_ref"
+NO_REF_MIX_MODE = "no_ref_mix"
+NO_REF_MIX_PROMPT = "Transcribe the speech in the input audio."
 SOURCE_ANALYSIS_FIELDS = [
     "task",
     "source",
+    "target_present",
+    "mix_audio",
     "target_active_snr_db",
     "target_active_target_power",
     "target_active_interference_power",
@@ -274,6 +279,43 @@ def attach_source_manifest(rows: list[dict[str, Any]], source_manifest: str) -> 
     return enriched
 
 
+def resolve_audio_path(path: Any) -> str:
+    audio_path = Path(str(path)).expanduser()
+    if not audio_path.is_absolute():
+        audio_path = SWIFT_ROOT.parent / audio_path
+    return str(audio_path.resolve())
+
+
+def eval_pair_id(row: dict[str, Any]) -> str:
+    return f"{row.get('oneasr_id')}#{row.get('eval_index')}"
+
+
+def no_ref_mix_record(row: dict[str, Any]) -> dict[str, Any] | None:
+    if task_group(row) != "ts_asr" or row.get("target_present") is False or not row.get("mix_audio"):
+        return None
+    return {
+        **row,
+        "eval_mode": NO_REF_MIX_MODE,
+        "eval_pair_id": eval_pair_id(row),
+        "messages": [
+            {"role": "system", "content": NO_REF_MIX_PROMPT},
+            {"role": "user", "content": "Input audio:\n<audio>"},
+        ],
+        "audios": [resolve_audio_path(row["mix_audio"])],
+    }
+
+
+def build_eval_requests(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    requests = []
+    for row in rows:
+        with_ref = {**row, "eval_mode": WITH_REF_MODE, "eval_pair_id": eval_pair_id(row)}
+        requests.append(with_ref)
+        no_ref = no_ref_mix_record(row)
+        if no_ref is not None:
+            requests.append(no_ref)
+    return requests
+
+
 def _mean(values: list[float]) -> float:
     return sum(values) / len(values) if values else 0.0
 
@@ -442,6 +484,67 @@ def summarize_by_task(rows: list[dict[str, Any]]) -> dict[str, dict[str, float]]
     return result
 
 
+def summarize_by_eval_mode(rows: list[dict[str, Any]]) -> dict[str, dict[str, float]]:
+    metric_rows = rows if rows and "cer" in rows[0] else build_metric_rows(rows)
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for row in metric_rows:
+        groups.setdefault(str(row.get("eval_mode") or WITH_REF_MODE), []).append(row)
+    result = {}
+    for name in [WITH_REF_MODE, NO_REF_MIX_MODE, *sorted(k for k in groups if k not in {WITH_REF_MODE, NO_REF_MIX_MODE})]:
+        if name in groups:
+            result[name] = summarize_predictions(groups[name])
+    return result
+
+
+def summarize_no_ref_control(rows: list[dict[str, Any]]) -> dict[str, float]:
+    metric_rows = rows if rows and "cer" in rows[0] else build_metric_rows(rows)
+    groups: dict[str, dict[str, dict[str, Any]]] = {}
+    for row in metric_rows:
+        pair_id = row.get("eval_pair_id")
+        mode = row.get("eval_mode")
+        if pair_id and mode in {WITH_REF_MODE, NO_REF_MIX_MODE}:
+            groups.setdefault(str(pair_id), {})[str(mode)] = row
+
+    pairs = [pair for pair in groups.values() if WITH_REF_MODE in pair and NO_REF_MIX_MODE in pair]
+    with_ref_cers = [pair[WITH_REF_MODE]["cer"] for pair in pairs]
+    no_ref_cers = [pair[NO_REF_MIX_MODE]["cer"] for pair in pairs]
+    result = {
+        "pairs": len(pairs),
+        "with_ref_cer": _mean(with_ref_cers),
+        "no_ref_mix_cer": _mean(no_ref_cers),
+        "cer_delta_no_ref_minus_with_ref": _mean(no_ref_cers) - _mean(with_ref_cers) if pairs else 0.0,
+        "with_ref_accuracy": 0.0,
+        "no_ref_mix_accuracy": 0.0,
+        "accuracy_delta_with_ref_minus_no_ref": 0.0,
+        "with_ref_only_correct": 0,
+        "no_ref_also_correct": 0,
+        "no_ref_only_correct": 0,
+        "both_wrong": 0,
+    }
+    if not pairs:
+        return result
+
+    with_ref_correct = 0
+    no_ref_correct = 0
+    for pair in pairs:
+        wr = bool(pair[WITH_REF_MODE]["normalized_exact_same"])
+        nr = bool(pair[NO_REF_MIX_MODE]["normalized_exact_same"])
+        with_ref_correct += int(wr)
+        no_ref_correct += int(nr)
+        if wr and nr:
+            result["no_ref_also_correct"] += 1
+        elif wr and not nr:
+            result["with_ref_only_correct"] += 1
+        elif nr and not wr:
+            result["no_ref_only_correct"] += 1
+        else:
+            result["both_wrong"] += 1
+    result["with_ref_accuracy"] = with_ref_correct / len(pairs)
+    result["no_ref_mix_accuracy"] = no_ref_correct / len(pairs)
+    result["accuracy_delta_with_ref_minus_no_ref"] = result["with_ref_accuracy"] - result["no_ref_mix_accuracy"]
+    return result
+
+
 def _fmt_metric(value: float | None) -> str:
     return "n/a" if value is None else f"{value:.6f}"
 
@@ -487,6 +590,27 @@ def write_eval_outputs(output_dir: str, step: int, rows: list[dict[str, Any]], m
     task_metrics = summarize_by_task(rows)
     _append_metric_table(lines, "## Task Summary", list(task_metrics.items()))
 
+    mode_metrics = summarize_by_eval_mode(rows)
+    _append_metric_table(lines, "## Eval Mode Summary", list(mode_metrics.items()))
+
+    no_ref_control = summarize_no_ref_control(rows)
+    if no_ref_control["pairs"]:
+        lines.extend([
+            "",
+            "## No-ref Mix Control",
+            "",
+            "| pairs | with_ref CER | no_ref_mix CER | CER delta(no_ref-with_ref) | with_ref acc | no_ref_mix acc | acc delta(with_ref-no_ref) | with_ref_only_correct | no_ref_also_correct | no_ref_only_correct | both_wrong |",
+            "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+            (
+                f"| {no_ref_control['pairs']} | {no_ref_control['with_ref_cer']:.6f} | "
+                f"{no_ref_control['no_ref_mix_cer']:.6f} | {no_ref_control['cer_delta_no_ref_minus_with_ref']:.6f} | "
+                f"{no_ref_control['with_ref_accuracy']:.6f} | {no_ref_control['no_ref_mix_accuracy']:.6f} | "
+                f"{no_ref_control['accuracy_delta_with_ref_minus_no_ref']:.6f} | "
+                f"{no_ref_control['with_ref_only_correct']} | {no_ref_control['no_ref_also_correct']} | "
+                f"{no_ref_control['no_ref_only_correct']} | {no_ref_control['both_wrong']} |"
+            ),
+        ])
+
     snr_buckets = summarize_by_snr(rows)
     if snr_buckets:
         lines.append("")
@@ -522,13 +646,13 @@ def write_eval_outputs(output_dir: str, step: int, rows: list[dict[str, Any]], m
             )
 
     lines.append("")
-    lines.append("| idx | language | WER | CER | normalized_exact_same | prediction | label |")
-    lines.append("| --- | --- | --- | --- | --- | --- | --- |")
+    lines.append("| idx | eval_mode | language | WER | CER | normalized_exact_same | prediction | label |")
+    lines.append("| --- | --- | --- | --- | --- | --- | --- | --- |")
     for idx, row in enumerate(rows[:50], start=1):
         pred = str(row["prediction"]).replace("|", "\\|")
         label = str(row["label"]).replace("|", "\\|")
         lines.append(
-            f"| {idx} | {row['language']} | {_fmt_metric(row.get('wer'))} | {row['cer']:.6f} | "
+            f"| {idx} | {row.get('eval_mode', WITH_REF_MODE)} | {row['language']} | {_fmt_metric(row.get('wer'))} | {row['cer']:.6f} | "
             f"{row['normalized_exact_same']} | {pred} | {label} |"
         )
     md_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -570,6 +694,27 @@ def print_eval_summary(metrics: dict[str, float], rows: list[dict[str, Any]] | N
         f"chinese_cer={metrics['chinese_cer']:.6f}(n={metrics['chinese_records']})"
     )
     if rows:
+        for name, item in summarize_by_eval_mode(rows).items():
+            print(
+                "[oneasr eval mode] "
+                f"mode={name} records={item['records']} cer={item['cer']:.6f} "
+                f"normalized_exact_same={item['normalized_exact_same']:.6f} "
+                f"english_wer={item['english_wer']:.6f}(n={item['english_records']}) "
+                f"chinese_cer={item['chinese_cer']:.6f}(n={item['chinese_records']})"
+            )
+        no_ref_control = summarize_no_ref_control(rows)
+        if no_ref_control["pairs"]:
+            print(
+                "[oneasr eval no_ref_control] "
+                f"pairs={no_ref_control['pairs']} "
+                f"with_ref_cer={no_ref_control['with_ref_cer']:.6f} "
+                f"no_ref_mix_cer={no_ref_control['no_ref_mix_cer']:.6f} "
+                f"cer_delta={no_ref_control['cer_delta_no_ref_minus_with_ref']:.6f} "
+                f"with_ref_only_correct={no_ref_control['with_ref_only_correct']} "
+                f"no_ref_also_correct={no_ref_control['no_ref_also_correct']} "
+                f"no_ref_only_correct={no_ref_control['no_ref_only_correct']} "
+                f"both_wrong={no_ref_control['both_wrong']}"
+            )
         for name, item in summarize_by_task(rows).items():
             print(
                 "[oneasr eval task] "
@@ -583,7 +728,8 @@ def print_eval_summary(metrics: dict[str, float], rows: list[dict[str, Any]] | N
 def run_internal_eval(trainer, args, dataset_path: str, source_manifest: str, output_dir: str, step: int) -> dict[str, float]:
     from swift.infer_engine import RequestConfig, TransformersEngine
 
-    records = load_eval_records(dataset_path)
+    records = attach_source_manifest(load_eval_records(dataset_path), source_manifest)
+    records = build_eval_requests(records)
     if not records:
         raise ValueError(f"No eval records with a final assistant message found: {dataset_path}")
 
@@ -611,9 +757,8 @@ def run_internal_eval(trainer, args, dataset_path: str, source_manifest: str, ou
         prediction = response.choices[0].message.content
         rows.append({**record, "prediction": prediction})
 
-    rows = attach_source_manifest(rows, source_manifest)
     rows = build_metric_rows(rows)
-    metrics = summarize_predictions(rows)
+    metrics = summarize_predictions([row for row in rows if row.get("eval_mode") == WITH_REF_MODE])
     write_eval_outputs(output_dir, step, rows, metrics)
     log_metrics_to_swanlab(args, metrics, step)
     print_eval_summary(metrics, rows)
@@ -649,7 +794,8 @@ def run_standalone_eval(args) -> dict[str, float]:
     engine = TransformersEngine(model, template=template, max_batch_size=args.batch_size)
     request_config = RequestConfig(max_tokens=args.max_new_tokens, temperature=0.0)
 
-    records = load_eval_records(args.val_dataset)
+    records = attach_source_manifest(load_eval_records(args.val_dataset), args.source_manifest)
+    records = build_eval_requests(records)
     if not records:
         raise ValueError(f"No eval records with a final assistant message found: {args.val_dataset}")
     model.eval()
@@ -658,9 +804,8 @@ def run_standalone_eval(args) -> dict[str, float]:
     rows = []
     for record, response in zip(records, responses):
         rows.append({**record, "prediction": response.choices[0].message.content})
-    rows = attach_source_manifest(rows, args.source_manifest)
     rows = build_metric_rows(rows)
-    metrics = summarize_predictions(rows)
+    metrics = summarize_predictions([row for row in rows if row.get("eval_mode") == WITH_REF_MODE])
     step = args.step if args.step is not None else infer_step_from_path(args.adapters[0] if args.adapters else args.model)
     write_eval_outputs(args.output_dir, step, rows, metrics)
     print_eval_summary(metrics, rows)
