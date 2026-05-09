@@ -9,6 +9,7 @@ ONEASR_ROOT="${ONEASR_ROOT:-$(cd "$(dirname "$0")/../../.." && pwd)}"
 MODEL_PATH=${ONEASR_ROOT}/ckpts/qwen3-asr-0_6b
 DATA_ROOT=${ONEASR_ROOT}/data/ts_asr_v6
 VAL_DATASET="${VAL_DATASET:-${DATA_ROOT}/val.swift.jsonl}"
+SOURCE_MANIFEST="${SOURCE_MANIFEST:-${DATA_ROOT}/val.jsonl}"
 
 cd "${ONEASR_ROOT}"
 
@@ -17,6 +18,7 @@ python ms-swift/examples/oneasr/ts_asr_plugin.py eval \
   --model "${MODEL_PATH}" \
   --adapters runs/swift_ts_asr_v6/... \
   --val_dataset "${VAL_DATASET}" \
+  --source_manifest "${SOURCE_MANIFEST}" \
   --output_dir runs/swift_ts_asr_v6/.../manual_eval \
   --batch_size 32 \
   --max_new_tokens 128

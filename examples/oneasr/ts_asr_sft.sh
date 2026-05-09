@@ -11,11 +11,13 @@ DATA_ROOT=${ONEASR_ROOT}/data/ts_asr_v6
 EXP_NAME=swift_ts_asr_v6
 TRAIN_DATASET="${TRAIN_DATASET:-${DATA_ROOT}/train.swift.jsonl}"
 VAL_DATASET="${VAL_DATASET:-${DATA_ROOT}/val.swift.jsonl}"
+SOURCE_MANIFEST="${SOURCE_MANIFEST:-${DATA_ROOT}/val.jsonl}"
 OUTPUT_DIR="${OUTPUT_DIR:-${ONEASR_ROOT}/runs/${EXP_NAME}}"
 REPORT_TO="${REPORT_TO:-swanlab}"
 
 # add qwen3-asr and ms-swift modules to PYTHONPATH
 export PYTHONPATH="${ONEASR_ROOT}/Qwen3-ASR:${ONEASR_ROOT}/ms-swift:${PYTHONPATH:-}"
+export ONEASR_SOURCE_MANIFEST="${SOURCE_MANIFEST}"
 
 swift sft \
   --external_plugins examples/oneasr/ts_asr_plugin.py \
